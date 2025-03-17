@@ -1,1 +1,183 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <SPI.h>
+#include <MFRC522.h>       // RFID Bibliothek
+#include <Keypad.h>        // Keypad Bibliothek
+#include <Servo.h>         // Servo Bibliothek
+#include <LiquidCrystal.h> // LCD Bibliothek
+
+//  Pin-Zuweisung für die angeschlossenen Komponenten
+#define SS_PIN 53
+#define RST_PIN 10
+#define SERVO_PIN 9
+#define GREEN_LED A0
+#define RED_LED A1
+#define BUZZER A2
+
+//  Initialisierung der Bauteile
+MFRC522 rfid(SS_PIN, RST_PIN); 
+Servo doorServo; 
+LiquidCrystal lcd(7, 6, 5, 4, 3, 2); 
+
+//  Keypad Konfiguration (4x4 Matrix)
+const byte ROWS = 4;  
+const byte COLS = 4;  
+char keys[ROWS][COLS] = {
+    {'1', '2', '3', 'A'},
+    {'4', '5', '6', 'B'},
+    {'7', '8', '9', 'C'},
+    {'*', '0', '#', 'D'}
+};
+byte rowPins[ROWS] = {22, 23, 24, 25}; 
+byte colPins[COLS] = {26, 27, 28, 29}; 
+Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
+
+//  Gültige RFID-Tags (Hier eigene Karten-UIDs eintragen)
+byte authorizedUID1[] = {0xF3, 0x93, 0x17, 0x2A};  // Erste autorisierte Karte
+byte authorizedUID2[] = {0x63, 0x18, 0x1C, 0x2D};  // Zweite autorisierte Karte
+
+//  PIN-Code für den Zugang
+String correctPIN = "1234";  // ⚠️ Hier deinen 4-stelligen PIN ändern!
+
+//  Setup-Funktion (wird einmalig beim Start ausgeführt)
+void setup() {
+    Serial.begin(9600); 
+    SPI.begin();       
+    rfid.PCD_Init();   
+    doorServo.attach(SERVO_PIN);
+    doorServo.write(0);  // Tür bleibt am Anfang geschlossen
+    
+    pinMode(GREEN_LED, OUTPUT);
+    pinMode(RED_LED, OUTPUT);
+    pinMode(BUZZER, OUTPUT);
+
+    lcd.begin(16, 2);
+    lcd.print("Bitte scannen");
+    lcd.setCursor(0, 1);
+    lcd.print("oder PIN eingeben");
+    delay(2000);
+    lcd.clear();
+}
+
+//  Funktion zur Überprüfung der RFID-Karte
+bool checkRFID() {
+    if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) {
+        return false;  
+    }
+
+    Serial.print("  RFID erkannt: ");
+    for (byte i = 0; i < rfid.uid.size; i++) {
+        Serial.print(rfid.uid.uidByte[i], HEX);
+        Serial.print(" ");
+    }
+    Serial.println();
+
+    // Überprüfung der UID für autorisierte Karten
+    bool authorized1 = true;
+    bool authorized2 = true;
+    
+    for (byte i = 0; i < 4; i++) {
+        if (rfid.uid.uidByte[i] != authorizedUID1[i]) {
+            authorized1 = false;
+        }
+        if (rfid.uid.uidByte[i] != authorizedUID2[i]) {
+            authorized2 = false;
+        }
+    }
+
+    rfid.PICC_HaltA();
+    return authorized1 || authorized2;  // Wenn eine der Karten übereinstimmt, wird true zurückgegeben
+}
+
+//  Funktion zum Öffnen der Tür
+void openDoor() {
+    doorServo.write(90);  // Tür öffnen
+    digitalWrite(GREEN_LED, HIGH);
+    digitalWrite(RED_LED, LOW);
+    lcd.clear();
+    lcd.print("Tür geöffnet");
+    delay(3000);
+    doorServo.write(0);  // Tür schließen
+    digitalWrite(GREEN_LED, LOW);
+    lcd.clear();
+    lcd.print("Bitte scannen");
+    lcd.setCursor(0, 1);
+    lcd.print("oder PIN eingeben");
+}
+
+//  Funktion zur PIN-Eingabe
+bool checkPIN() {
+    String enteredPIN = "";
+    lcd.clear();
+    lcd.print("PIN: ");
+
+    while (true) {
+        char key = keypad.getKey();
+        if (key) {
+            if (key == '#') { // Bestätigung
+                Serial.println(" Eingegebener PIN: " + enteredPIN);
+                return enteredPIN == correctPIN;
+            } else if (key == '*') { // Löschen
+                enteredPIN = "";
+                lcd.setCursor(5, 0);
+                lcd.print("    "); // Alte Eingabe löschen
+                lcd.setCursor(5, 0);
+            } else if (enteredPIN.length() < 4) {
+                enteredPIN += key;
+                lcd.print("*"); // Zeigt * statt Zahlen für Sicherheit
+            }
+        }
+    }
+}
+
+//  Loop-Funktion (läuft kontinuierlich)
+void loop() {
+    lcd.setCursor(0, 0);
+    lcd.print("Bitte scannen");
+    lcd.setCursor(0, 1);
+    lcd.print("oder PIN eingeben");
+
+    //  RFID-Kartenprüfung
+    if (checkRFID()) {
+        lcd.clear();
+        lcd.print(" RFID OK");
+        Serial.println(" RFID akzeptiert");
+        openDoor();
+    } else if (rfid.PICC_IsNewCardPresent()) {  // Falls eine falsche Karte erkannt wurde
+        Serial.println(" Falsche Karte erkannt!");
+        lcd.clear();
+        lcd.print(" Falsche Karte!");
+        digitalWrite(RED_LED, HIGH);
+        digitalWrite(BUZZER, HIGH);
+        delay(1000);
+        digitalWrite(RED_LED, LOW);
+        digitalWrite(BUZZER, LOW);
+        lcd.clear();
+        lcd.print("Bitte scannen");
+        lcd.setCursor(0, 1);
+        lcd.print("oder PIN eingeben");
+    }
+
+    //  PIN-Eingabe über das Keypad
+    char key = keypad.getKey();
+    if (key == 'A') { // Starte PIN-Eingabe mit Taste "A"
+        lcd.clear();
+        lcd.print("PIN eingeben...");
+        if (checkPIN()) {
+            Serial.println(" PIN akzeptiert");
+            lcd.clear();
+            lcd.print(" PIN OK");
+            openDoor();
+        } else {
+            Serial.println(" Falscher PIN!");
+            lcd.clear();
+            lcd.print(" Falscher PIN!");
+            digitalWrite(RED_LED, HIGH);
+            digitalWrite(BUZZER, HIGH);
+            delay(1000);
+            digitalWrite(RED_LED, LOW);
+            digitalWrite(BUZZER, LOW);
+        }
+    }
+}
 
